@@ -186,3 +186,37 @@ test('shutdown aborts an in-flight gateway request without opening a socket', as
   assert.equal(aborted, true); assert.equal(instances.length, 0);
   await assert.rejects(provider.start(), /stopped/u);
 });
+
+test('shutdown waits until an aborted in-flight reply has settled without retrying', async t => {
+  const { Socket, instances } = socketFixture();
+  let release;
+  const draining = new Promise(resolve => { release = resolve; });
+  let sending = false;
+  let aborted = false;
+  let attempts = 0;
+  const provider = createProvider({ credentials, WebSocket: Socket, onMessage: async () => {},
+    fetch: async (url, options) => {
+      if (url.endsWith('/gateway/connections/open')) return json({ endpoint, ticket: 'fixture-ticket' });
+      attempts++;
+      sending = true;
+      return await new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          aborted = true;
+          void draining.then(() => reject(new Error('fixture-abort-after-cleanup')));
+        }, { once: true });
+      });
+    },
+  });
+  t.after(async () => { release(); await provider.stop(); });
+  await provider.start(); await until(() => instances.length === 1); instances[0].open();
+  const message = { senderId: credentials.ownerId, conversationId: credentials.conversationId,
+    replyContext: { sessionWebhook: webhook, expiresAt: Date.now() + 60_000 } };
+  const rejected = assert.rejects(provider.sendReply({ message, text: 'Fixture reply' }), /DingTalk request failed/u);
+  await until(() => sending);
+  let stopped = false;
+  const stop = provider.stop().then(() => { stopped = true; });
+  await until(() => aborted); await delay(5);
+  assert.equal(stopped, false);
+  release(); await stop; await rejected;
+  assert.equal(stopped, true); assert.equal(attempts, 1);
+});

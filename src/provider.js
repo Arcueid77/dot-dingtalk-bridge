@@ -118,6 +118,7 @@ export function createProvider({
   let stopped = false;
   let connected = false;
   const tasks = new Set();
+  const sends = new Set();
 
   function abort() {
     controller.abort();
@@ -252,7 +253,7 @@ export function createProvider({
       abort();
       signal?.removeEventListener('abort', abort);
       await runner;
-      await Promise.allSettled([...tasks]);
+      await Promise.allSettled([...tasks, ...sends]);
     },
     status() { return { connected }; },
     async sendReply({ message, text }) {
@@ -266,9 +267,14 @@ export function createProvider({
         throw new Error('DingTalk reply window has expired.');
       }
       const url = sessionUrl(context.sessionWebhook);
-      const result = await post(url, { msgtype: 'text', text: { content: text } });
-      if (result?.errcode !== 0) throw new Error('DingTalk reply was not confirmed.');
-      return {};
+      const work = (async () => {
+        const result = await post(url, { msgtype: 'text', text: { content: text } });
+        if (result?.errcode !== 0) throw new Error('DingTalk reply was not confirmed.');
+        return {};
+      })();
+      sends.add(work);
+      try { return await work; }
+      finally { sends.delete(work); }
     },
   };
 }
