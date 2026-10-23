@@ -1,6 +1,7 @@
 # Provider development
 
-The DingTalk driver owns only Stream protocol and original-session text replies.
+The DingTalk driver owns Stream protocol, original-session text replies and
+owner-bound media downloads/uploads/replies.
 It uses the documented gateway and callback topic, acknowledges only after core
 ingestion succeeds, and leaves persistence, authorization and final-reply state
 to `@dot-bridge/core/channels`. It never retries a reply request. Only connection
@@ -14,7 +15,7 @@ the value should only be raised after checking the current endpoint-specific
 contract. Oversize replies are rejected, never silently truncated or split.
 
 `ws` is pinned, TLS verification stays enabled, WebSocket redirects are disabled,
-frames and HTTP response bodies are bounded to 1 MiB, and requests have deadlines.
+frames and JSON response bodies are bounded to 1 MiB, media to 8 MiB, and requests have deadlines.
 The gateway-issued endpoint must match the known official public Stream host and
 `/connect` path. A provider endpoint change requires reviewing and updating that
 allowlist rather than forwarding tickets to an arbitrary host. Session URLs must
@@ -32,6 +33,22 @@ vendored. References consulted on 2026-10-19:
 
 Run `npm run check` and `npm test`. Fixture tests inject fetch and WebSocket,
 including ingress-ACK ordering, owner/chat guards, endpoint/redirect/body limits,
-metadata handling, uncertain replies and shutdown. They never connect a real
+private media references, media formats, upload/token separation, revocation
+between upload stages, uncertain replies and shutdown. They never connect a real
 account. Account permissions, actual app identity and original-dot delivery need
 operator acceptance with an explicitly bound account.
+
+Media and pairing were extended against official references on 2026-10-23; see
+the source links in `media.md`. The legacy token is used only for media upload;
+the new API token stays on `api.dingtalk.com`. Download codes and signed download
+URLs are never part of public attachment metadata. Only the exact known OSS
+bucket may be normalized from HTTP to HTTPS, before any network request.
+
+Enrollment uses a separate opt-in provider without send/read methods, requires
+the stopped-consumer confirmation, and accepts a fresh 128-bit nonce from this
+robot's private chat. The shared core helper writes protected credentials with
+atomic no-replace semantics; ordinary live mode always requires an owner binding.
+
+Local Node 24.19.0 verification: `npm run check`, all 18 fixture tests and
+`npm pack --dry-run --ignore-scripts` passed with the packaged core 0.5.0. No
+real application permission, media delivery or owner pairing was exercised.

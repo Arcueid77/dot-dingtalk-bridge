@@ -1,5 +1,6 @@
 import WebSocketClient from 'ws';
 import { setTimeout as delay } from 'node:timers/promises';
+import { amrDuration, attachmentMime, mediaName, mediaUrl, readMedia, validateMediaReply } from './media.js';
 
 const GATEWAY = 'https://api.dingtalk.com/v1.0/gateway/connections/open';
 const ROBOT_TOPIC = '/v1.0/im/bot/messages/get';
@@ -7,7 +8,15 @@ const MAX_BODY = 1024 * 1024;
 const HTTP_TIMEOUT = 15_000;
 
 function boundedString(value, limit = 512) {
-  return typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\u0000-\u001f]/u.test(value);
+  return typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(value);
+}
+
+function authorizeSend(authorize) {
+  if (authorize === undefined) return;
+  if (typeof authorize !== 'function') throw new Error('DingTalk send authorization is invalid.');
+  const result = authorize();
+  if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => {});
+  if (result !== undefined) throw new Error('DingTalk send authorization must be synchronous.');
 }
 
 function requireString(value, limit = 512) {
@@ -74,39 +83,46 @@ async function boundedJson(response) {
 function contentParts(data) {
   const content = data.content && typeof data.content === 'object' ? data.content : {};
   const attachments = [];
+  const mediaRefs = [];
+  function add(kind, item) {
+    if (attachments.length >= 10) return;
+    const attachment = { kind };
+    if (mediaName(item.fileName)) attachment.name = item.fileName;
+    attachments.push(attachment);
+    const code = item.downloadCode ?? item.pictureDownloadCode;
+    mediaRefs.push(boundedString(code, 4096) && ['image', 'audio', 'file'].includes(kind) ? { downloadCode: code } : null);
+  }
   let text = '';
   if (data.msgtype === 'text') text = data.text?.content;
   else if (data.msgtype === 'richText' && Array.isArray(content.richText)) {
     const pieces = [];
     for (const item of content.richText.slice(0, 100)) {
       if (typeof item?.text === 'string') pieces.push(item.text);
-      if (item?.downloadCode || item?.pictureDownloadCode) attachments.push({ kind: 'image' });
+      if (item?.downloadCode || item?.pictureDownloadCode) add('image', item);
     }
     text = pieces.join('');
   } else if (['image', 'picture', 'audio', 'video', 'file'].includes(data.msgtype)) {
     const kind = ({ picture: 'image', audio: 'audio' })[data.msgtype] ?? data.msgtype;
-    const attachment = { kind };
-    if (boundedString(content.fileName, 255)) attachment.name = content.fileName;
-    attachments.push(attachment);
+    add(kind, content);
     // DingTalk may include its own transcription. No audio is downloaded here.
     if (data.msgtype === 'audio' && typeof content.recognition === 'string') text = content.recognition;
   } else return null;
   if (typeof text !== 'string') text = '';
   if (text.length > 20_000 || (!text.trim() && attachments.length === 0)) return null;
-  return { text, attachments: attachments.slice(0, 10) };
+  return { text, attachments, mediaRefs };
 }
 
-export function createProvider({
+function createTransport({
   credentials, onMessage, signal, fetch = globalThis.fetch,
   WebSocket = WebSocketClient, timing = {},
-}) {
+}, onPairingMessage) {
   if (!credentials || typeof onMessage !== 'function' || typeof fetch !== 'function') {
     throw new Error('DingTalk provider configuration is invalid.');
   }
   const clientId = requireString(credentials.clientId);
   const clientSecret = requireString(credentials.clientSecret, 4096);
-  const ownerId = requireString(credentials.ownerId);
-  const conversationId = requireString(credentials.conversationId);
+  const ownerId = onPairingMessage ? undefined : requireString(credentials.ownerId, 256);
+  const conversationId = onPairingMessage ? undefined : requireString(credentials.conversationId, 256);
   const robotCode = requireString(credentials.robotCode ?? clientId);
   const corpId = credentials.corpId === undefined ? undefined : requireString(credentials.corpId);
   const controller = new AbortController();
@@ -119,6 +135,8 @@ export function createProvider({
   let connected = false;
   const tasks = new Set();
   const sends = new Set();
+  let access;
+  let oapiAccess;
 
   function abort() {
     controller.abort();
@@ -128,16 +146,50 @@ export function createProvider({
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
 
-  async function post(url, body) {
+  async function post(url, body, headers = {}) {
     try {
       const response = await fetch(url, {
         method: 'POST', redirect: 'error',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
         body: JSON.stringify(body),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeout)]),
       });
       return await boundedJson(response);
     } catch { throw new Error('DingTalk request failed.'); }
+  }
+
+  async function token(legacy = false) {
+    const current = legacy ? oapiAccess : access;
+    if (current?.expires > Date.now() + 60_000) return current.value;
+    let result;
+    if (legacy) {
+      const url = new URL('https://oapi.dingtalk.com/gettoken');
+      url.searchParams.set('appkey', clientId);
+      url.searchParams.set('appsecret', clientSecret);
+      try {
+        result = await boundedJson(await fetch(url.href, { method: 'GET', redirect: 'error',
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeout)]),
+        }));
+      } catch { throw new Error('DingTalk authentication failed.'); }
+      if (result.errcode !== 0) throw new Error('DingTalk authentication failed.');
+    } else result = await post('https://api.dingtalk.com/v1.0/oauth2/accessToken', { appKey: clientId, appSecret: clientSecret });
+    const value = legacy ? result.access_token : result.accessToken;
+    const ttl = legacy ? result.expires_in : result.expireIn;
+    if (!boundedString(value, 4096) || !Number.isSafeInteger(ttl) || ttl <= 0 || ttl > 86_400) throw new Error('DingTalk authentication failed.');
+    const entry = { value, expires: Date.now() + ttl * 1000 };
+    if (legacy) oapiAccess = entry; else access = entry;
+    return value;
+  }
+
+  function ownMessage(message) {
+    if (message?.senderId !== ownerId || message?.conversationId !== conversationId) throw new Error('DingTalk message binding is invalid.');
+    if (!Number.isSafeInteger(message.replyContext?.expiresAt) || message.replyContext.expiresAt <= Date.now()) throw new Error('DingTalk reply window has expired.');
+    sessionUrl(message.replyContext.sessionWebhook);
+  }
+
+  async function track(work) {
+    sends.add(work);
+    try { return await work; } finally { sends.delete(work); }
   }
 
   function write(source, payload) {
@@ -159,9 +211,18 @@ export function createProvider({
     if (!data || typeof data !== 'object') return;
     // This first version deliberately binds one private conversation. Core
     // checks the same pair again before committing any message.
-    if (data.conversationType !== '1' || data.senderStaffId !== ownerId || data.conversationId !== conversationId ||
+    if (data.conversationType !== '1' || (!onPairingMessage && (data.senderStaffId !== ownerId || data.conversationId !== conversationId)) ||
         data.robotCode !== robotCode || (corpId && data.chatbotCorpId !== corpId) ||
         (data.senderId && data.senderId === data.chatbotUserId)) {
+      acknowledge(source, frame);
+      return;
+    }
+    if (onPairingMessage) {
+      if (data.msgtype === 'text' && boundedString(data.senderStaffId, 256) && boundedString(data.conversationId, 256) &&
+          !data.isForward && !data.isForwarded && !data.forwarded && !data.forward && !data.quotedMessage) {
+        await onPairingMessage({ text: data.text?.content, ownerId: data.senderStaffId, conversationId: data.conversationId,
+          ...(Number.isSafeInteger(data.createAt) ? { timestamp: data.createAt } : {}) });
+      }
       acknowledge(source, frame);
       return;
     }
@@ -172,10 +233,11 @@ export function createProvider({
     }
     let webhook;
     try { webhook = sessionUrl(data.sessionWebhook); } catch { acknowledge(source, frame); return; }
+    const { mediaRefs, ...content } = parts;
     const message = {
-      id: data.msgId, senderId: ownerId, conversationId, ...parts,
+      id: data.msgId, senderId: ownerId, conversationId, ...content,
       replyDeadline: data.sessionWebhookExpiredTime,
-      replyContext: { sessionWebhook: webhook, expiresAt: data.sessionWebhookExpiredTime },
+      replyContext: { sessionWebhook: webhook, expiresAt: data.sessionWebhookExpiredTime, ...(mediaRefs.length ? { mediaRefs } : {}) },
     };
     if (Number.isSafeInteger(data.createAt) && data.createAt > 0) message.timestamp = data.createAt;
     await onMessage(message);
@@ -256,7 +318,73 @@ export function createProvider({
       await Promise.allSettled([...tasks, ...sends]);
     },
     status() { return { connected }; },
-    async sendReply({ message, text }) {
+    validateMediaReply,
+    async readAttachment({ message, attachmentIndex }) {
+      ownMessage(message);
+      if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
+      const attachment = message.attachments?.[attachmentIndex];
+      const reference = message.replyContext.mediaRefs?.[attachmentIndex];
+      if (!Number.isSafeInteger(attachmentIndex) || attachmentIndex < 0 || !['image', 'audio', 'file'].includes(attachment?.kind) ||
+          !boundedString(reference?.downloadCode, 4096)) throw new Error('DingTalk attachment is unavailable.');
+      return track((async () => {
+        const value = await token();
+        const result = await post('https://api.dingtalk.com/v1.0/robot/messageFiles/download', {
+          downloadCode: reference.downloadCode, robotCode,
+        }, { 'x-acs-dingtalk-access-token': value });
+        const url = mediaUrl(result.downloadUrl);
+        try {
+          const response = await fetch(url, { method: 'GET', redirect: 'error',
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeout)]),
+          });
+          const data = await readMedia(response);
+          return { data, mimeType: attachmentMime(data, attachment.kind, response.headers.get('content-type')),
+            ...(attachment.name ? { name: attachment.name } : {}) };
+        } catch { throw new Error('DingTalk media download failed or exceeded 8 MiB.'); }
+      })());
+    },
+    async sendMediaReply({ message, media, text, authorize }) {
+      ownMessage(message);
+      validateMediaReply({ media, text });
+      if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
+      return track((async () => {
+        authorizeSend(authorize);
+        const uploadToken = await token(true);
+        const url = new URL('https://oapi.dingtalk.com/media/upload');
+        url.searchParams.set('access_token', uploadToken);
+        url.searchParams.set('type', media.type === 'audio' ? 'voice' : media.type);
+        const form = new FormData();
+        form.append('media', new Blob([media.data], { type: media.mimeType }), media.name);
+        let result;
+        authorizeSend(authorize);
+        try {
+          result = await boundedJson(await fetch(url.href, { method: 'POST', body: form, redirect: 'error',
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeout)]),
+          }));
+        } catch { throw new Error('DingTalk media upload failed.'); }
+        if (result.errcode !== 0 || !boundedString(result.media_id, 512) || !/^@?[A-Za-z0-9_.-]+$/u.test(result.media_id)) throw new Error('DingTalk media upload was not confirmed.');
+        const value = await token();
+        ownMessage(message);
+        let msgKey;
+        let msgParam;
+        if (media.type === 'image') { msgKey = 'sampleImageMsg'; msgParam = { photoURL: result.media_id }; }
+        else if (media.type === 'audio') {
+          msgKey = 'sampleAudio';
+          msgParam = { mediaId: `https://down.dingtalk.com/media/${result.media_id.replace(/^@/u, '')}`, duration: String(amrDuration(media.data)) };
+        } else {
+          msgKey = 'sampleFile';
+          const extension = /\.([A-Za-z0-9]{1,16})$/u.exec(media.name)?.[1]?.toLowerCase() ?? 'file';
+          msgParam = { mediaId: result.media_id, fileName: media.name, fileType: extension };
+        }
+        // The target comes from the persisted owner binding, never a tool argument.
+        authorizeSend(authorize);
+        const sent = await post('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend', {
+          robotCode, userIds: [ownerId], msgKey, msgParam: JSON.stringify(msgParam),
+        }, { 'x-acs-dingtalk-access-token': value });
+        if (!boundedString(sent.processQueryKey, 512) || (Array.isArray(sent.invalidStaffIdList) && sent.invalidStaffIdList.length)) throw new Error('DingTalk media reply was not confirmed.');
+        return { providerMessageId: sent.processQueryKey };
+      })());
+    },
+    async sendReply({ message, text, authorize }) {
       if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
       if (message?.senderId !== ownerId || message?.conversationId !== conversationId ||
           typeof text !== 'string' || !text.trim() || text.length > 600 || Buffer.byteLength(text) > 1800) {
@@ -268,6 +396,7 @@ export function createProvider({
       }
       const url = sessionUrl(context.sessionWebhook);
       const work = (async () => {
+        authorizeSend(authorize);
         const result = await post(url, { msgtype: 'text', text: { content: text } });
         if (result?.errcode !== 0) throw new Error('DingTalk reply was not confirmed.');
         return {};
@@ -277,4 +406,14 @@ export function createProvider({
       finally { sends.delete(work); }
     },
   };
+}
+
+export function createProvider(options) { return createTransport(options); }
+
+// Enrollment is a separate opt-in consumer with no send/read capability. The
+// normal live factory always requires and enforces the persisted owner binding.
+export function createEnrollmentProvider(options) {
+  if (options?.confirmStopped !== true || typeof options.onPairingMessage !== 'function') throw new Error('DingTalk pairing requires confirmation that the old consumer is stopped.');
+  const provider = createTransport({ ...options, onMessage: async () => {} }, options.onPairingMessage);
+  return { start: provider.start, stop: provider.stop, status: provider.status };
 }

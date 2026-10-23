@@ -10,6 +10,30 @@ npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
 在[钉钉开放平台](https://open.dingtalk.com/)创建或复用自己的应用，启用机器人，使用 Stream 模式接收机器人消息，并按照后台要求发布到本人可用的范围。Stream 通过服务端主动建立长连接，不需要配置入站 Webhook。
 
+图片、语音和文件还会用到「企业内机器人发送消息」权限、应用 accessToken 与媒体上传接口。应用管理员应按后台提示开通所需权限后重新发布。机器人能收到文字，不代表媒体接口的权限也已生效。
+
+## 配对本人私聊
+
+推荐用临时口令配对，这样不用手工寻找用户和私聊编号：
+
+1. 停止同一机器人的旧桥和其他消费者，避免两套程序同时收消息。
+2. 以最终运行用户准备受保护的 `app.json`，只放 `clientId`、`clientSecret`，可选 `robotCode`、`corpId`。文件为 `0600`，所在目录为 `0700`；Windows 使用该用户专用 ACL。
+3. 以同一用户运行下列命令。`--output` 必须是尚不存在的文件；命令不会覆盖已有绑定。
+
+```sh
+node scripts/pair-owner.js \
+  --app-credentials-file /var/lib/dot-bridge/private/dingtalk/app.json \
+  --output /var/lib/dot-bridge/private/dingtalk/credentials.json \
+  --confirm-stopped --confirm-private-storage
+```
+
+4. 在五分钟内，从本人和机器人的**单聊**发送屏幕上的完整 `dotbridge-pair:...` 口令。不要把口令发到群聊或转给其他人。配对只认这次口令，不会认领第一个发消息的人。
+5. 出现保存成功后，配对程序退出。把下面的 `DINGTALK_CREDENTIALS_FILE` 指向生成的文件，再启动服务和订阅。
+
+命令只显示临时口令及结果，不打印账号身份或应用密钥。不知道是否还有旧实例时，先协调停止旧实例；`--confirm-stopped` 是操作者对此的确认。若超时，修正机器人发布范围或连接问题后重新运行，会生成新的口令。
+
+已有经过核对的绑定资料也可以按下列格式直接准备完整配置：
+
 由应用管理员准备以下私有 JSON 文件。示例中的内容均为占位文字，替换为该应用和本人私聊的真实信息；不要放入 Git，也不要把真实文件发到聊天中。
 
 ```json
@@ -38,7 +62,7 @@ HOST=127.0.0.1
 PORT=8790
 DINGTALK_TRANSPORT=stream
 TUNNEL_SERVICE_KEY_FILE=/var/lib/dot-bridge/private/dingtalk.service-key
-DINGTALK_CREDENTIALS_FILE=/var/lib/dot-bridge/private/dingtalk.credentials.json
+DINGTALK_CREDENTIALS_FILE=/var/lib/dot-bridge/private/dingtalk/credentials.json
 STORAGE_KEY_FILE=/var/lib/dot-bridge/private/dingtalk.storage-key
 DATABASE_PATH=/var/lib/dot-bridge/data/dingtalk/messages.sqlite
 BRIDGE_LOCK_DIRECTORY=/var/lib/dot-bridge/data/locks
@@ -60,8 +84,10 @@ node --env-file=/var/lib/dot-bridge/private/dingtalk.env scripts/run-live.js --c
 
 ## 连接原 dot
 
-按[总仓库运行说明](https://github.com/Arcueid77/dot-bridge/blob/dev/unified-distribution/docs/operations.md)连接官方 Secure MCP Tunnel，并在**原来的 dot**刷新插件。应能发现 `get_dingtalk_message`、`reply_to_dingtalk`、`get_dingtalk_reply_status`、`check_dingtalk_setup` 和 `dingtalk.message.created` 事件。回调地址必须由原 dot 的实际订阅流程提供，确认其精确域名后配置 `CALLBACK_HOSTS`。
+按[总仓库运行说明](https://github.com/Arcueid77/dot-bridge/blob/dev/unified-distribution/docs/operations.md)连接官方 Secure MCP Tunnel，并在**原来的 dot**刷新插件。应能发现 `get_dingtalk_message`、`get_dingtalk_attachment`、`reply_to_dingtalk`、`reply_dingtalk_media`、`get_dingtalk_reply_status`、`check_dingtalk_setup` 和 `dingtalk.message.created` 事件。回调地址必须由原 dot 的实际订阅流程提供，确认其精确域名后配置 `CALLBACK_HOSTS`。
 
 随后从本人绑定的钉钉私聊发送一条内容唯一的文字，确认原 dot 收到并在同一私聊只回复一次。群聊、其他用户或其他应用的消息会被忽略。
+
+发消息没有回答时，让原 dot 调用 `check_dingtalk_setup`：`gateway_connected` 表示钉钉连接情况，`subscription_active` 表示原 dot 的有效订阅。订阅失败时查看该工具中的失败阶段和原因，再修正对应问题；不要重复点创建。`CALLBACK_HOSTS` 才是本入口读取的域名配置名。图片、语音和文件的使用见[附件与回复](media.md)。
 
 钉钉的会话回复地址有有效期，桥会同时遵守该期限与本地的消息处理期限。超时、连接中断或结果不明的回复不会自动重发；先查看 `get_dingtalk_reply_status`，不要通过重新提交去猜是否发送成功。更换服务端、应用或存储时，应先停止旧消费者，保留数据库、原存储 key 和订阅状态后再迁移。

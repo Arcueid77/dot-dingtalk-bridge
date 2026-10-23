@@ -128,7 +128,8 @@ test('attachment metadata and platform transcript never trigger media download',
   assert.equal(messages[0].text, 'Platform transcript');
   assert.deepEqual(messages[0].attachments, [{ kind: 'audio' }]);
   assert.deepEqual(messages[1].attachments, [{ kind: 'image' }]);
-  assert.equal(JSON.stringify(messages).includes('download'), false);
+  assert.equal(JSON.stringify(messages.map(({ replyContext, ...publicMessage }) => publicMessage)).includes('download'), false);
+  assert.equal(messages[0].replyContext.mediaRefs[0].downloadCode, 'never-fetch-this');
 });
 
 test('gateway and response policy rejects untrusted endpoint and redirects', async t => {
