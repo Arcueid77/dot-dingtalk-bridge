@@ -12,10 +12,14 @@ The bridge uses a conservative initial ceiling of 600 JavaScript characters and
 the maximum accepted by every DingTalk robot variant. The official reply guide
 links the shared custom-robot format but does not itself specify a text ceiling;
 the value should only be raised after checking the current endpoint-specific
-contract. Oversize replies are rejected, never silently truncated or split.
+contract. The complete answer input is now at most 20,000 well-formed JavaScript
+characters / 60,000 UTF-8 bytes. Above the native threshold, `sendReply` chooses
+one existing file-upload path before any mutation and sends the complete
+`answer.txt`. It never changes paths after a send, truncates, retries uncertainty
+or splits an answer across independent provider requests.
 
 `ws` is pinned, TLS verification stays enabled, WebSocket redirects are disabled,
-frames and JSON response bodies are bounded to 1 MiB, media to 8 MiB, and requests have deadlines.
+frames and JSON response bodies are bounded to 1 MiB, media to 5 MiB, and requests have deadlines.
 The gateway-issued endpoint must match the known official public Stream host and
 `/connect` path. A provider endpoint change requires reviewing and updating that
 allowlist rather than forwarding tickets to an arbitrary host. Session URLs must

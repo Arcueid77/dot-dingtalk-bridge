@@ -162,7 +162,7 @@ test('reply uses stored official session, enforces expiry and size, and never re
     await assert.rejects(provider.sendReply({ message: { ...message, replyContext: context }, text: 'Fixture reply' }));
   }
   await assert.rejects(provider.sendReply({ message: { ...message, senderId: 'other-user' }, text: 'Fixture reply' }));
-  await assert.rejects(provider.sendReply({ message, text: '汉'.repeat(7000) }));
+  await assert.rejects(provider.sendReply({ message, text: '汉'.repeat(20001) }));
   assert.equal(requests.length, 1);
   await provider.stop();
   let attempts = 0;

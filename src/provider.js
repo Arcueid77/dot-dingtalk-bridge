@@ -1,6 +1,7 @@
 import WebSocketClient from 'ws';
 import { setTimeout as delay } from 'node:timers/promises';
 import { amrDuration, attachmentMime, mediaName, mediaUrl, readMedia, validateMediaReply } from './media.js';
+import {channel} from './channel.js';
 
 const GATEWAY = 'https://api.dingtalk.com/v1.0/gateway/connections/open';
 const ROBOT_TOPIC = '/v1.0/im/bot/messages/get';
@@ -303,7 +304,7 @@ function createTransport({
     }
   }
 
-  return {
+  const provider = {
     async start() {
       if (stopped) throw new Error('DingTalk provider has stopped.');
       if (started) return;
@@ -339,7 +340,7 @@ function createTransport({
           const data = await readMedia(response);
           return { data, mimeType: attachmentMime(data, attachment.kind, response.headers.get('content-type')),
             ...(attachment.name ? { name: attachment.name } : {}) };
-        } catch { throw new Error('DingTalk media download failed or exceeded 8 MiB.'); }
+        } catch { throw new Error('DingTalk media download failed or exceeded 5 MiB.'); }
       })());
     },
     async sendMediaReply({ message, media, text, authorize }) {
@@ -384,15 +385,21 @@ function createTransport({
         return { providerMessageId: sent.processQueryKey };
       })());
     },
-    async sendReply({ message, text, authorize }) {
+    async sendReply({ message, text, idempotencyKey, authorize }) {
       if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
       if (message?.senderId !== ownerId || message?.conversationId !== conversationId ||
-          typeof text !== 'string' || !text.trim() || text.length > 600 || Buffer.byteLength(text) > 1800) {
+          typeof text !== 'string' || !text.trim() || !text.isWellFormed() ||
+          text.length > channel.maxReplyText || Buffer.byteLength(text) > 60000) {
         throw new Error('DingTalk reply is invalid or exceeds the single-reply limit.');
       }
       const context = message.replyContext;
       if (!Number.isSafeInteger(context?.expiresAt) || context.expiresAt <= Date.now()) {
         throw new Error('DingTalk reply window has expired.');
+      }
+      if (text.length > channel.nativeMaxReplyText || Buffer.byteLength(text) > 1800) {
+        const data = Buffer.from(text, 'utf8');
+        try { return await provider.sendMediaReply({message, media: {type: 'file', data, mimeType: 'text/plain', name: 'answer.txt'}, idempotencyKey, authorize}); }
+        finally { data.fill(0); }
       }
       const url = sessionUrl(context.sessionWebhook);
       const work = (async () => {
@@ -406,6 +413,7 @@ function createTransport({
       finally { sends.delete(work); }
     },
   };
+  return provider;
 }
 
 export function createProvider(options) { return createTransport(options); }

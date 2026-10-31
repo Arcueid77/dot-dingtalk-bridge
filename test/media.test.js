@@ -19,9 +19,46 @@ const message = (kind = 'image') => ({ senderId: credentials.ownerId, conversati
 const media = (type = 'image') => ({ type, data: type === 'image' ? png : type === 'audio' ? amr : Buffer.from('fixture document'),
   mimeType: type === 'image' ? 'image/png' : type === 'audio' ? 'audio/amr' : 'text/plain', name: `fixture.${type === 'image' ? 'png' : type === 'audio' ? 'amr' : 'txt'}` });
 
+test('long Unicode answers use one complete text file instead of truncation or multiple replies', async t => {
+  const calls = [];
+  const provider = createProvider({credentials, onMessage: async () => {}, fetch: async (url, options) => {
+    calls.push({url, options});
+    if (url.includes('/gettoken?')) return json({errcode: 0, access_token: 'fixture-oapi', expires_in: 7200});
+    if (url.includes('/media/upload?')) return json({errcode: 0, media_id: '@fixture-upload'});
+    if (url.endsWith('/oauth2/accessToken')) return json({accessToken: 'fixture-access', expireIn: 7200});
+    return json({processQueryKey: 'fixture-reply'});
+  }});
+  t.after(() => provider.stop());
+  const text = '汉'.repeat(19998) + '🌏';
+  await provider.sendReply({message: message(), text, idempotencyKey: 'long'});
+  assert.equal(await calls[1].options.body.get('media').text(), text);
+  assert.equal(calls[1].options.body.get('media').name, 'answer.txt');
+  assert.equal(JSON.parse(calls.at(-1).options.body).msgKey, 'sampleFile');
+  assert.equal(calls.filter(call => call.url === webhook).length, 0);
+  assert.equal(calls.length, 4);
+  const before = calls.length;
+  await assert.rejects(provider.sendReply({message: message(), text: 'x\uD800', idempotencyKey: 'invalid'}));
+  await assert.rejects(provider.sendReply({message: message(), text: 'x'.repeat(20001), idempotencyKey: 'large'}));
+  assert.equal(calls.length, before);
+});
+
 test('DingTalk exposes only implemented media capabilities', () => {
   assert.deepEqual(channel.media, { read: ['image', 'audio', 'file'], reply: ['image', 'audio', 'file'] });
   assert.equal(channel.maxMediaReplyText, 0);
+});
+
+test('an uncertain long-answer file send never retries or switches to a native text reply', async t => {
+  let finals = 0, native = 0;
+  const provider = createProvider({credentials, onMessage: async () => {}, fetch: async url => {
+    if (url === webhook) native++;
+    if (url.includes('/gettoken?')) return json({errcode: 0, access_token: 'fixture-oapi', expires_in: 7200});
+    if (url.includes('/media/upload?')) return json({errcode: 0, media_id: '@fixture-upload'});
+    if (url.endsWith('/oauth2/accessToken')) return json({accessToken: 'fixture-access', expireIn: 7200});
+    finals++; throw new Error('private uncertain result');
+  }});
+  t.after(() => provider.stop());
+  await assert.rejects(provider.sendReply({message: message(), text: '汉'.repeat(601), idempotencyKey: 'long'}));
+  assert.equal(finals, 1); assert.equal(native, 0);
 });
 
 test('media codes remain private and aligned across rich-text attachments', async t => {

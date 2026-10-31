@@ -1,4 +1,5 @@
-export const MAX_MEDIA = 8 * 1024 * 1024;
+import {MAX_MEDIA_BYTES as MAX_MEDIA} from '@dot-bridge/core/channels/media.js';
+export {MAX_MEDIA};
 
 // Fixed DingTalk delivery origins. Generic *.aliyuncs.com would also trust
 // arbitrary customer buckets and is intentionally not accepted.
@@ -49,7 +50,7 @@ export function validateMediaReply({ media, text }) {
   if (!media || !['image', 'audio', 'file'].includes(media.type) || !Buffer.isBuffer(media.data) ||
       !media.data.length || media.data.length > MAX_MEDIA || !mediaName(media.name) ||
       typeof media.mimeType !== 'string' || !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/iu.test(media.mimeType) ||
-      (text !== undefined && text !== '')) throw new Error('DingTalk media requires one file up to 8 MiB without a caption.');
+      (text !== undefined && text !== '')) throw new Error('DingTalk media requires one file up to 5 MiB without a caption.');
   if (media.type === 'image' && imageMime(media.data) !== media.mimeType) throw new Error('DingTalk image type does not match its content.');
   if (media.type === 'audio') {
     if (media.mimeType !== 'audio/amr' || media.data.length > 2 * 1024 * 1024) throw new Error('DingTalk voice requires an AMR file up to 2 MiB.');
@@ -91,6 +92,6 @@ export async function readMedia(response) {
     return Buffer.concat(parts);
   } catch {
     try { if (reader) await reader.cancel(); else await response?.body?.cancel(); } catch { /* no raw URL diagnostics */ }
-    throw new Error('DingTalk media download failed or exceeded 8 MiB.');
+    throw new Error('DingTalk media download failed or exceeded 5 MiB.');
   } finally { reader?.releaseLock(); }
 }
