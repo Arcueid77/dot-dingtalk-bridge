@@ -385,6 +385,17 @@ function createTransport({
         return { providerMessageId: sent.processQueryKey };
       })());
     },
+    async sendOwnerMessage({text, authorize}) {
+      if (controller.signal.aborted || !ownerId || typeof text !== 'string' || !text.trim() || !text.isWellFormed() || text.length > 2000) throw new Error('DingTalk owner text is invalid.');
+      return track((async () => {
+        authorizeSend(authorize);
+        const value = await token();
+        authorizeSend(authorize);
+        const sent = await post('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend', {robotCode, userIds:[ownerId], msgKey:'sampleText', msgParam:JSON.stringify({content:text})}, {'x-acs-dingtalk-access-token':value});
+        if (!boundedString(sent.processQueryKey, 512) || (Array.isArray(sent.invalidStaffIdList) && sent.invalidStaffIdList.length)) throw new Error('DingTalk owner message was not confirmed.');
+        return {};
+      })());
+    },
     async sendReply({ message, text, idempotencyKey, authorize }) {
       if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
       if (message?.senderId !== ownerId || message?.conversationId !== conversationId ||

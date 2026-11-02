@@ -38,6 +38,20 @@ function callback(overrides = {}, id = 'fixture-frame') {
   };
 }
 
+test('proactive DingTalk text uses the paired user and official bot send API, without a session webhook',async t=>{
+ const {Socket,instances}=socketFixture(),calls=[];
+ const provider=createProvider({credentials,WebSocket:Socket,onMessage:async()=>{},fetch:async(url,options)=>{
+   calls.push({url,body:JSON.parse(options.body)});
+   if(url.endsWith('/gateway/connections/open'))return json({endpoint,ticket:'fixture-ticket'});
+   if(url.endsWith('/oauth2/accessToken'))return json({accessToken:'fixture-token',expireIn:7200});
+   if(url.endsWith('/robot/oToMessages/batchSend'))return json({processQueryKey:'fixture-process'});
+   throw Error('unexpected endpoint');
+ }});t.after(()=>provider.stop());await provider.start();await until(()=>instances.length===1);instances[0].open();
+ await provider.sendOwnerMessage({text:'fixture notification',authorize:()=>{}});
+ const sent=calls.at(-1);assert.equal(sent.body.msgKey,'sampleText');assert.deepEqual(sent.body.userIds,[credentials.ownerId]);assert.equal(sent.body.robotCode,credentials.clientId);assert.deepEqual(JSON.parse(sent.body.msgParam),{content:'fixture notification'});
+ const before=calls.length;await assert.rejects(provider.sendOwnerMessage({text:'blocked',authorize:()=>{throw Error('revoked');}}));assert.equal(calls.length,before);
+});
+
 test('subscribes only robot callback and acknowledges after durable ingestion', async t => {
   const { Socket, instances } = socketFixture();
   const requests = [];
