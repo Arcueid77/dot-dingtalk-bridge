@@ -1,5 +1,7 @@
 # 配置与使用
 
+[English](configuration.en.md)
+
 先准备钉钉应用，再配置桥和原 dot 的事件订阅。Node.js 需要 `>=24.15` 且 `<25`。本仓库使用锁文件安装依赖：
 
 ```sh
@@ -59,7 +61,7 @@ BRIDGE_MODE=tunnel
 TUNNEL_SERVICE_OPERATION=live
 TUNNEL_SERVICE_OWNER_ID=tunnel-owner:dot-bridge
 HOST=127.0.0.1
-PORT=8790
+PORT=8801
 DINGTALK_TRANSPORT=stream
 TUNNEL_SERVICE_KEY_FILE=/var/lib/dot-bridge/private/dingtalk.service-key
 DINGTALK_CREDENTIALS_FILE=/var/lib/dot-bridge/private/dingtalk/credentials.json
@@ -69,6 +71,8 @@ BRIDGE_LOCK_DIRECTORY=/var/lib/dot-bridge/data/locks
 CALLBACK_TRANSPORT_MODE=standard
 CALLBACK_HOSTS=替换为原dot真实订阅回调的精确域名
 ```
+
+示例显式使用 8801；省略 `PORT` 时组件内置值为 8790。组合部署先选择实际空闲端口。
 
 服务 key 和存储 key 需要由部署人员安全准备。存储 key 为 32 字节的标准 Base64 编码；数据库和备份必须保留同一个存储 key。服务 key 不得与聚合路由器或其他渠道共用。不要照着占位内容启动，也不要为回调域名添加通配符。
 
@@ -84,10 +88,10 @@ node --env-file=/var/lib/dot-bridge/private/dingtalk.env scripts/run-live.js --c
 
 ## 连接原 dot
 
-按[总仓库运行说明](https://github.com/Arcueid77/dot-bridge/blob/dev/unified-distribution/docs/operations.md)连接官方 Secure MCP Tunnel，并在**原来的 dot**刷新插件。应能发现 `get_dingtalk_message`、`get_dingtalk_attachment`、`reply_to_dingtalk`、`reply_dingtalk_media`、`get_dingtalk_reply_status`、`check_dingtalk_setup` 和 `dingtalk.message.created` 事件。回调地址必须由原 dot 的实际订阅流程提供，确认其精确域名后配置 `CALLBACK_HOSTS`。
+按[总仓库运行说明](https://github.com/Arcueid77/dot-bridge/blob/main/docs/operations.md)连接官方 Secure MCP Tunnel，并在**原来的 dot**刷新插件。应能发现 `get_dingtalk_message`、`get_dingtalk_attachment`、`reply_to_dingtalk`、`reply_dingtalk_media`、`get_dingtalk_reply_status`、`check_dingtalk_readiness` 和 `dingtalk.message.created` 事件。回调地址必须由原 dot 的实际订阅流程提供，确认其精确域名后配置 `CALLBACK_HOSTS`。
 
 随后从本人绑定的钉钉私聊发送一条内容唯一的文字，确认原 dot 收到并在同一私聊只回复一次。群聊、其他用户或其他应用的消息会被忽略。
 
-发消息没有回答时，让原 dot 调用 `check_dingtalk_setup`：`gateway_connected` 表示钉钉连接情况，`subscription_active` 表示原 dot 的有效订阅。订阅失败时查看该工具中的失败阶段和原因，再修正对应问题；不要重复点创建。`CALLBACK_HOSTS` 才是本入口读取的域名配置名。图片、语音和文件的使用见[附件与回复](media.md)。
+发消息没有回答时，让原 dot 调用 `check_dingtalk_readiness`：`gateway_connected` 表示钉钉连接情况，`subscription_active` 表示原 dot 的有效订阅。订阅失败时查看该工具中的失败阶段和原因，再修正对应问题；不要重复点创建。`CALLBACK_HOSTS` 才是本入口读取的域名配置名。图片、语音和文件的使用见[附件与回复](media.md)。
 
 钉钉的会话回复地址有有效期，桥会同时遵守该期限与本地的消息处理期限。超时、连接中断或结果不明的回复不会自动重发；先查看 `get_dingtalk_reply_status`，不要通过重新提交去猜是否发送成功。更换服务端、应用或存储时，应先停止旧消费者，保留数据库、原存储 key 和订阅状态后再迁移。

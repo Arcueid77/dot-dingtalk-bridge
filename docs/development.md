@@ -1,5 +1,12 @@
 # Provider development
 
+## 当前文档基线 / Current documentation baseline
+
+组件 0.5.4 使用固定 core 0.11.1，版本和源 SHA 以 `package.json`、`vendor/core-release.json` 及锁文件为准。Windows／Linux CI 已运行。2026-11-05 记录：平台账号与真实端到端验收待完成，源码和合成检查已覆盖。
+
+Source documentation follows registered capabilities. Preserve reviewed artifacts and package documentation through the next normal release. Actual account acceptance remains separate.
+
+
 The DingTalk driver owns Stream protocol, original-session text replies and
 owner-bound media downloads/uploads/replies.
 It uses the documented gateway and callback topic, acknowledges only after core
