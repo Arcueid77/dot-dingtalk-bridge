@@ -30,3 +30,9 @@ Keep one consumer and preserve the original database, storage key, binding and s
 Explicit `DOT_BRIDGE_OUTBOUND=owner-text` enables owner-only proactive text and literal reminders. Each message is at most 2,000 characters; recurring reminders require an end date. Dynamic reports come from the original dot's scheduled tasks. See [scheduled messages](https://github.com/Arcueid77/dot-bridge/blob/main/docs/scheduled-messages.en.md).
 
 Implementation and validation notes are in [development](docs/development.md). Actual account onboarding and end-to-end results are tracked separately from source tests.
+
+## Choices, uploads and reminder management
+
+Numbered text choices let the user answer with a selection. A dot environment with programmatic file access can upload generated media in bounded encrypted chunks, verify its size and SHA-256, then submit the source-bound final reply. Files are limited to 5 MiB and this provider's supported media types and formats.
+
+Literal reminders support weekdays, fixed intervals, pause, resume and delivery history. Check `check_dingtalk_outbound` before use and supply the saved reminder ID and current revision. Resuming skips old paused occurrences.
