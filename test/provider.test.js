@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createProvider } from '../src/provider.js';
+import {interactionPolicy} from '@dot-bridge/core/channels/experience-policy.js';
+import {channel} from '../src/channel.js';
 
 const credentials = { clientId: 'fixture-app', clientSecret: 'fixture-secret', ownerId: 'fixture-owner', conversationId: 'fixture-chat' };
 const endpoint = 'wss://wss-open-connection.dingtalk.com/connect';
@@ -37,6 +39,69 @@ function callback(overrides = {}, id = 'fixture-frame') {
       msgtype: 'text', text: { content: 'Fixture question' }, ...overrides }),
   };
 }
+
+test('configured DingTalk groups require their selected members and preserve the original session reply', async t => {
+  const {Socket, instances} = socketFixture();
+  const received = [], calls = [];
+  const interaction = interactionPolicy({groups: [{conversation_id: 'group-chat', members: 'allowlist', allow_from: ['member']}]}, channel);
+  const provider = createProvider({credentials, interaction, WebSocket: Socket,
+    fetch: async (url, options) => { calls.push({url, options}); return json(url === webhook ? {errcode: 0} : {endpoint, ticket: 'fixture-ticket'}); },
+    onMessage: async value => received.push(value)});
+  t.after(() => provider.stop());
+  await provider.start();
+  await until(() => instances.length === 1);
+  const socket = instances[0];
+  socket.open();
+  socket.receive(callback({conversationType: '2', conversationId: 'group-chat', senderStaffId: 'other', isInAtList: true}, 'excluded'));
+  socket.receive(callback({conversationType: '2', conversationId: 'group-chat', senderStaffId: 'member', isInAtList: false}, 'unmentioned'));
+  socket.receive(callback({conversationType: '2', conversationId: 'group-chat', senderStaffId: 'member', isInAtList: true}, 'accepted'));
+  await until(() => received.length === 1);
+  assert.equal(received[0].senderId, 'member');
+  assert.equal(received[0].conversationId, 'group-chat');
+  assert.equal(received[0].chatType, 'group');
+  await provider.sendReply({message: received[0], text: 'one reply', authorize() {}});
+  assert.equal(calls.at(-1).url, webhook);
+  assert.equal(JSON.parse(calls.at(-1).options.body).text.content, 'one reply');
+});
+
+test('DingTalk processing reaction and AI card reuse the original message and one persisted card reference', async t => {
+  const {Socket, instances} = socketFixture();
+  const messages = [], calls = [];
+  const provider = createProvider({credentials: {...credentials, aiCard: {templateId: 'fixture-template'}}, WebSocket: Socket,
+    fetch: async (url, options) => {
+      calls.push({url, options, body: JSON.parse(options.body)});
+      if (url.endsWith('/connections/open')) return json({endpoint, ticket: 'fixture-ticket'});
+      if (url.endsWith('/accessToken')) return json({accessToken: 'fixture-token', expireIn: 7200});
+      return json({success: true});
+    }, onMessage: async message => messages.push(message)});
+  t.after(() => provider.stop());
+  await provider.start();
+  await until(() => instances.length === 1);
+  instances[0].open();
+  instances[0].receive(callback());
+  await until(() => messages.length === 1);
+  const message = messages[0];
+  const feedback = await provider.setFeedback({message, active: true, authorize() {}});
+  const reaction = calls.at(-1);
+  assert.match(reaction.url, /\/robot\/emotion\/reply$/);
+  assert.equal(reaction.body.openMsgId, message.id);
+  assert.equal(reaction.body.openConversationId, message.conversationId);
+  await provider.setFeedback({message, active: false, reference: feedback, authorize() {}});
+  assert.match(calls.at(-1).url, /\/emotion\/recall$/);
+  const reference = await provider.sendProgress({message, text: 'Generated', authorize() {}});
+  const created = calls.at(-1);
+  assert.match(created.url, /\/card\/instances\/createAndDeliver$/);
+  assert.equal(created.body.openSpaceId, 'dtv1.card//IM_ROBOT.' + credentials.ownerId);
+  await provider.sendProgress({message, text: 'Generated complete answer', reference, final: true, authorize() {}});
+  const updated = calls.find(call => call.url.endsWith('/card/streaming'));
+  assert.equal(updated.options.method, 'PUT');
+  assert.equal(updated.body.outTrackId, reference.id);
+  assert.equal(updated.body.isFinalize, true);
+  assert.equal(calls.filter(call => call.url.endsWith('/createAndDeliver')).length, 1);
+  const count = calls.length;
+  await assert.rejects(provider.sendProgress({message, text: 'blocked', reference, authorize() {throw Error('revoked');}}));
+  assert.equal(calls.length, count);
+});
 
 test('proactive DingTalk text uses the paired user and official bot send API, without a session webhook',async t=>{
  const {Socket,instances}=socketFixture(),calls=[];

@@ -2,6 +2,8 @@ import WebSocketClient from 'ws';
 import { setTimeout as delay } from 'node:timers/promises';
 import { amrDuration, attachmentMime, mediaName, mediaUrl, readMedia, validateMediaReply } from './media.js';
 import {channel} from './channel.js';
+import {conversationRoute, interactionPolicy} from '@dot-bridge/core/channels/experience-policy.js';
+import {createHash, randomUUID} from 'node:crypto';
 
 const GATEWAY = 'https://api.dingtalk.com/v1.0/gateway/connections/open';
 const ROBOT_TOPIC = '/v1.0/im/bot/messages/get';
@@ -114,7 +116,7 @@ function contentParts(data) {
 }
 
 function createTransport({
-  credentials, onMessage, signal, fetch = globalThis.fetch,
+  credentials, interaction, onMessage, signal, fetch = globalThis.fetch,
   WebSocket = WebSocketClient, timing = {},
 }, onPairingMessage) {
   if (!credentials || typeof onMessage !== 'function' || typeof fetch !== 'function') {
@@ -126,6 +128,12 @@ function createTransport({
   const conversationId = onPairingMessage ? undefined : requireString(credentials.conversationId, 256);
   const robotCode = requireString(credentials.robotCode ?? clientId);
   const corpId = credentials.corpId === undefined ? undefined : requireString(credentials.corpId);
+  const routing = {channel, credentials, interaction: interaction ?? interactionPolicy({}, channel)};
+  const card = credentials.aiCard;
+  if (card && (typeof card !== 'object' || !boundedString(card.templateId, 256) ||
+      (card.contentKey !== undefined && !/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(card.contentKey)))) {
+    throw new Error('DingTalk AI card configuration is invalid.');
+  }
   const controller = new AbortController();
   const requestTimeout = timing.requestTimeoutMs ?? HTTP_TIMEOUT;
   const retryBase = timing.reconnectMs ?? 1000;
@@ -147,10 +155,10 @@ function createTransport({
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
 
-  async function post(url, body, headers = {}) {
+  async function post(url, body, headers = {}, method = 'POST') {
     try {
       const response = await fetch(url, {
-        method: 'POST', redirect: 'error',
+        method, redirect: 'error',
         headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
         body: JSON.stringify(body),
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(requestTimeout)]),
@@ -182,9 +190,9 @@ function createTransport({
     return value;
   }
 
-  function ownMessage(message) {
-    if (message?.senderId !== ownerId || message?.conversationId !== conversationId) throw new Error('DingTalk message binding is invalid.');
-    if (!Number.isSafeInteger(message.replyContext?.expiresAt) || message.replyContext.expiresAt <= Date.now()) throw new Error('DingTalk reply window has expired.');
+  function ownMessage(message, {allowExpired = false} = {}) {
+    if (!message || !conversationRoute(routing, message)) throw new Error('DingTalk message binding is invalid.');
+    if (!Number.isSafeInteger(message.replyContext?.expiresAt) || (!allowExpired && message.replyContext.expiresAt <= Date.now())) throw new Error('DingTalk reply window has expired.');
     sessionUrl(message.replyContext.sessionWebhook);
   }
 
@@ -210,9 +218,9 @@ function createTransport({
     let data;
     try { data = JSON.parse(frame.data); } catch { return; }
     if (!data || typeof data !== 'object') return;
-    // This first version deliberately binds one private conversation. Core
-    // checks the same pair again before committing any message.
-    if (data.conversationType !== '1' || (!onPairingMessage && (data.senderStaffId !== ownerId || data.conversationId !== conversationId)) ||
+    const group = data.conversationType === '2';
+    if (!['1', '2'].includes(data.conversationType) || (onPairingMessage && group) ||
+        !boundedString(data.senderStaffId, 256) || !boundedString(data.conversationId, 256) ||
         data.robotCode !== robotCode || (corpId && data.chatbotCorpId !== corpId) ||
         (data.senderId && data.senderId === data.chatbotUserId)) {
       acknowledge(source, frame);
@@ -236,11 +244,13 @@ function createTransport({
     try { webhook = sessionUrl(data.sessionWebhook); } catch { acknowledge(source, frame); return; }
     const { mediaRefs, ...content } = parts;
     const message = {
-      id: data.msgId, senderId: ownerId, conversationId, ...content,
+      id: data.msgId, senderId: data.senderStaffId, conversationId: data.conversationId, ...content,
+      ...(group ? {chatType: 'group', botMentioned: data.isInAtList === true} : {}),
       replyDeadline: data.sessionWebhookExpiredTime,
       replyContext: { sessionWebhook: webhook, expiresAt: data.sessionWebhookExpiredTime, ...(mediaRefs.length ? { mediaRefs } : {}) },
     };
     if (Number.isSafeInteger(data.createAt) && data.createAt > 0) message.timestamp = data.createAt;
+    if (!conversationRoute(routing, message)) { acknowledge(source, frame); return; }
     await onMessage(message);
     acknowledge(source, frame);
   }
@@ -320,6 +330,23 @@ function createTransport({
     },
     status() { return { connected }; },
     validateMediaReply,
+    async setFeedback({message, active, reference, authorize}) {
+      if (!active && reference !== 'thinking') return;
+      if (!started || controller.signal.aborted) throw new Error('DingTalk provider is stopped.');
+      ownMessage(message, {allowExpired: !active});
+      authorizeSend(authorize);
+      return track((async () => {
+        const accessToken = await token();
+        authorizeSend(authorize);
+        const response = await post('https://api.dingtalk.com/v1.0/robot/emotion/' + (active ? 'reply' : 'recall'), {
+          robotCode, openMsgId: message.id, openConversationId: message.conversationId,
+          emotionType: 2, emotionName: '🤔处理中',
+          textEmotion: {emotionId: '2659900', emotionName: '🤔处理中', text: '🤔处理中', backgroundId: 'im_bg_1'},
+        }, {'x-acs-dingtalk-access-token': accessToken});
+        if (response.success === false || (response.errcode !== undefined && response.errcode !== 0)) throw new Error('DingTalk feedback was rejected.');
+        return active ? 'thinking' : null;
+      })());
+    },
     async readAttachment({ message, attachmentIndex }) {
       ownMessage(message);
       if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
@@ -378,8 +405,9 @@ function createTransport({
         }
         // The target comes from the persisted owner binding, never a tool argument.
         authorizeSend(authorize);
-        const sent = await post('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend', {
-          robotCode, userIds: [ownerId], msgKey, msgParam: JSON.stringify(msgParam),
+        const group = message.chatType === 'group';
+        const sent = await post('https://api.dingtalk.com/v1.0/robot/' + (group ? 'groupMessages/send' : 'oToMessages/batchSend'), {
+          robotCode, ...(group ? {openConversationId: message.conversationId} : {userIds: [ownerId]}), msgKey, msgParam: JSON.stringify(msgParam),
         }, { 'x-acs-dingtalk-access-token': value });
         if (!boundedString(sent.processQueryKey, 512) || (Array.isArray(sent.invalidStaffIdList) && sent.invalidStaffIdList.length)) throw new Error('DingTalk media reply was not confirmed.');
         return { providerMessageId: sent.processQueryKey };
@@ -398,14 +426,18 @@ function createTransport({
     },
     async sendReply({ message, text, idempotencyKey, authorize }) {
       if (controller.signal.aborted) throw new Error('DingTalk provider has stopped.');
-      if (message?.senderId !== ownerId || message?.conversationId !== conversationId ||
-          typeof text !== 'string' || !text.trim() || !text.isWellFormed() ||
+      ownMessage(message);
+      if (typeof text !== 'string' || !text.trim() || !text.isWellFormed() ||
           text.length > channel.maxReplyText || Buffer.byteLength(text) > 60000) {
         throw new Error('DingTalk reply is invalid or exceeds the single-reply limit.');
       }
       const context = message.replyContext;
       if (!Number.isSafeInteger(context?.expiresAt) || context.expiresAt <= Date.now()) {
         throw new Error('DingTalk reply window has expired.');
+      }
+      if (card) {
+        const reference = await provider.sendProgress({message, text, final: true, authorize});
+        return {providerMessageId: reference.id};
       }
       if (text.length > channel.nativeMaxReplyText || Buffer.byteLength(text) > 1800) {
         const data = Buffer.from(text, 'utf8');
@@ -424,6 +456,56 @@ function createTransport({
       finally { sends.delete(work); }
     },
   };
+  if (card) {
+    provider.canProgressFinal = ({text}) => typeof text === 'string' && text.length <= channel.maxReplyText;
+    provider.sendProgress = async ({message, text, reference, final = false, failed = false, authorize}) => {
+      if (!started || controller.signal.aborted) throw new Error('DingTalk provider is stopped.');
+      ownMessage(message);
+      if (typeof text !== 'string' || !text.trim() || !text.isWellFormed() || text.length > channel.maxReplyText) {
+        throw new Error('DingTalk card content is invalid.');
+      }
+      const id = 'dotbridge_' + createHash('sha256').update(JSON.stringify([message.conversationId, message.id])).digest('hex');
+      if (reference && reference.id !== id) throw new Error('DingTalk card reference differs from its source.');
+      authorizeSend(authorize);
+      return track((async () => {
+      const accessToken = await token();
+      const headers = {'x-acs-dingtalk-access-token': accessToken};
+      const contentKey = card.contentKey ?? 'msgContent';
+      const parameters = {[contentKey]: text, flowStatus: final ? failed ? '5' : '3' : '2', staticMsgContent: '',
+        sys_full_json_obj: JSON.stringify({order: [contentKey]}), config: JSON.stringify({autoLayout: true})};
+      if (!reference) {
+        const group = message.chatType === 'group';
+        authorizeSend(authorize);
+        const response = await post('https://api.dingtalk.com/v1.0/card/instances/createAndDeliver', {
+          cardTemplateId: card.templateId, outTrackId: id, userIdType: 1, callbackType: 'STREAM',
+          cardData: {cardParamMap: parameters},
+          imGroupOpenSpaceModel: {supportForward: false}, imRobotOpenSpaceModel: {supportForward: false},
+          openSpaceId: 'dtv1.card//' + (group ? 'IM_GROUP.' + message.conversationId : 'IM_ROBOT.' + message.senderId),
+          ...(group ? {imGroupOpenDeliverModel: {robotCode}} : {imRobotOpenDeliverModel: {spaceType: 'IM_ROBOT', robotCode}}),
+        }, headers);
+        if (response.success === false || (Array.isArray(response.result) && response.result.some(item => item.success === false))) {
+          throw new Error('DingTalk card delivery was rejected.');
+        }
+      } else {
+        authorizeSend(authorize);
+        await post('https://api.dingtalk.com/v1.0/card/streaming', {outTrackId: id, guid: randomUUID(),
+          key: contentKey, content: text, isFull: true, isFinalize: final, isError: failed}, headers, 'PUT');
+        if (final) {
+          authorizeSend(authorize);
+          await post('https://api.dingtalk.com/v1.0/card/instances', {outTrackId: id,
+            cardData: {cardParamMap: parameters}, cardUpdateOptions: {updateCardDataByKey: true}}, headers, 'PUT');
+        }
+      }
+      return {id, text};
+      })());
+    };
+    provider.beginProgress = ({message, authorize}) => provider.sendProgress({message, text: '正在处理…', authorize});
+    provider.finishProgress = async ({message, reference, cancelled, replacement, authorize}) => {
+      if (!reference || typeof reference.text !== 'string') throw new Error('DingTalk card reference is unavailable.');
+      const text = cancelled ? replacement ? '完整回复将作为附件发送。' : '本条处理已结束。' : reference.text;
+      await provider.sendProgress({message, text, reference, final: true, failed: cancelled && !replacement, authorize});
+    };
+  }
   return provider;
 }
 

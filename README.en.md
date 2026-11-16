@@ -36,3 +36,20 @@ Implementation and validation notes are in [development](docs/development.md). A
 Numbered text choices let the user answer with a selection. A dot environment with programmatic file access can upload generated media in bounded encrypted chunks, verify its size and SHA-256, then submit the source-bound final reply. Files are limited to 5 MiB and this provider's supported media types and formats.
 
 Literal reminders support weekdays, fixed intervals, pause, resume and delivery history. Check `check_dingtalk_outbound` before use and supply the saved reminder ID and current revision. Resuming skips old paused occurrences.
+
+
+## Tasks, consecutive messages and speech
+
+Task tools return a source-bound reference, passive deadline and remaining seconds. The original dot can save one complete text result. The paired owner can use `/tasks` and `/result reference` in the original DM. Source retention applies, and ambiguous delivery stays uncertain.
+
+The protected interaction policy accepts `queue`, for example `{"mode":"batch","window_ms":750,"max_messages":5}`. Modes are `independent`, `serial` and `batch`, defaulting to independent. A batch retains every source and replies through the last source as its anchor. Attachments, quotes and work already started are handled separately, with the existing conversation/member isolation.
+
+Linux operators can install eSpeak NG and the protected audio runtime, then set `DOT_BRIDGE_SPEECH_SYNTHESIS=local-espeak` and `DOT_BRIDGE_SPEECH_VOICE=zh`. The original dot uses `check_dingtalk_speech` and `reply_dingtalk_speech`, limited to 2000 characters and 120 seconds. The full text is also retained in the task record.
+
+An explicitly rejected one-time proactive send can be retried after owner confirmation using `retry_dingtalk_outbound`, its original ID and current revision. The per-channel proactive switch still applies. Recurring reminders keep their edit/resume flow. Hosted-dot stop, reset and approvals use the original platform controls.
+
+## Groups and processing cards
+
+Configure selected groups through `DOT_BRIDGE_INTERACTION_POLICY_FILE`. Membership supports owner, allowlist and all; triggers support verified mentions, keywords and all messages actually delivered by the platform. The Stream event binds the real session and sender. The original dot uses one `conversation=configured` subscription.
+
+Feedback supports platform reactions and recall. If an approved AI-card template is available, configure `aiCard.templateId` and optional `contentKey` in the protected credential document. The bridge creates, progressively updates and finalizes the same card. The application administrator prepares its template and permissions. Synthesized speech is delivered as a WAV file.
